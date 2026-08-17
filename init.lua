@@ -264,8 +264,9 @@ end
 -- next two windows sit on the left (bottom slightly taller, top smaller); any others
 -- fold behind the main. Cycle by focusing a window and pressing again -> it goes big.
 -- (The meeting shape, minus the meeting; app-agnostic.)
-local DASH_MAIN_FRACTION   = 0.60   -- big-right pane width share
+local DASH_MAIN_FRACTION   = 0.68   -- big-right pane width share (wider)
 local DASH_BOTTOM_FRACTION = 0.55   -- bottom-left height share (a touch taller than top-left)
+local DASH_STACK_LEFT      = 30     -- left margin for the stack (< TILE_PAD, so nudged toward the left edge)
 local function layoutDashboard()
   local scr = focusedScreen()
   local wins = realWindowsOn(scr)
@@ -285,10 +286,10 @@ local function layoutDashboard()
   local rest = {}
   for _, w in ipairs(wins) do if w:id() ~= big:id() then rest[#rest + 1] = w end end
 
-  local usableW = sf.w - 2 * TILE_PAD - TILE_GAP
+  local usableW = sf.w - DASH_STACK_LEFT - TILE_PAD - TILE_GAP  -- stack nudged left, big keeps TILE_PAD right margin
   local rightW  = usableW * DASH_MAIN_FRACTION
   local leftW   = usableW - rightW
-  local leftX   = sf.x + TILE_PAD
+  local leftX   = sf.x + DASH_STACK_LEFT
   local rightX  = leftX + leftW + TILE_GAP
   local topY    = sf.y + TILE_PAD
   local botH    = (h - TILE_GAP) * DASH_BOTTOM_FRACTION

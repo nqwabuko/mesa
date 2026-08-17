@@ -67,6 +67,11 @@ Everything is named constants at the top of `init.lua`:
 - If a meeting ever fails to auto-arrange, press `⌥⌘0` mid-call to dump the real
   window titles and tune the patterns in `MEETING_APPS`.
 
+## Useful things
+
+Beyond the window layouts, this repo doubles as a table (a *mesa*) for things worth
+remembering: see [`useful/`](useful/). First list: [good software](useful/good-software.md).
+
 ## Requirements
 
 macOS, Hammerspoon, and Accessibility permission. That's it.
