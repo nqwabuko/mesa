@@ -1,0 +1,7 @@
+# Diagnostic logs written at runtime (may contain meeting/window titles)
+*.log
+
+# Local backups made by install.sh
+init.lua.backup.*
+
+.DS_Store
