@@ -266,16 +266,17 @@ end
 -- (The meeting shape, minus the meeting; app-agnostic.)
 local DASH_MAIN_FRACTION   = 0.68   -- big-right pane width share (wider)
 local DASH_BOTTOM_FRACTION = 0.55   -- bottom-left height share (a touch taller than top-left)
-local DASH_STACK_LEFT      = 30     -- left margin for the stack (< TILE_PAD, so nudged toward the left edge)
+local DASH_PAD             = GAP    -- tight outer margin, like the meeting layout (bigger panes)
+local DASH_GAP             = GAP    -- gap between panes
 local function layoutDashboard()
   local scr = focusedScreen()
   local wins = realWindowsOn(scr)
   if #wins == 0 then return end
   local sf = scr:frame()
-  local h  = sf.h - 2 * TILE_PAD
+  local h  = sf.h - 2 * DASH_PAD
 
   if #wins == 1 then
-    wins[1]:setFrame(hs.geometry.rect(sf.x + TILE_PAD, sf.y + TILE_PAD, sf.w - 2 * TILE_PAD, h))
+    wins[1]:setFrame(hs.geometry.rect(sf.x + DASH_PAD, sf.y + DASH_PAD, sf.w - 2 * DASH_PAD, h))
     wins[1]:focus()
     return
   end
@@ -286,17 +287,17 @@ local function layoutDashboard()
   local rest = {}
   for _, w in ipairs(wins) do if w:id() ~= big:id() then rest[#rest + 1] = w end end
 
-  local usableW = sf.w - DASH_STACK_LEFT - TILE_PAD - TILE_GAP  -- stack nudged left, big keeps TILE_PAD right margin
+  local usableW = sf.w - 2 * DASH_PAD - DASH_GAP
   local rightW  = usableW * DASH_MAIN_FRACTION
   local leftW   = usableW - rightW
-  local leftX   = sf.x + DASH_STACK_LEFT
-  local rightX  = leftX + leftW + TILE_GAP
-  local topY    = sf.y + TILE_PAD
-  local botH    = (h - TILE_GAP) * DASH_BOTTOM_FRACTION
-  local topH    = (h - TILE_GAP) - botH
+  local leftX   = sf.x + DASH_PAD
+  local rightX  = leftX + leftW + DASH_GAP
+  local topY    = sf.y + DASH_PAD
+  local botH    = (h - DASH_GAP) * DASH_BOTTOM_FRACTION
+  local topH    = (h - DASH_GAP) - botH
 
   local bigRect = hs.geometry.rect(rightX, topY, rightW, h)
-  local blRect  = hs.geometry.rect(leftX, topY + topH + TILE_GAP, leftW, botH)  -- bottom-left, taller
+  local blRect  = hs.geometry.rect(leftX, topY + topH + DASH_GAP, leftW, botH)  -- bottom-left, taller
   local tlRect  = hs.geometry.rect(leftX, topY, leftW, topH)                    -- top-left, smaller
 
   big:setFrame(bigRect)
