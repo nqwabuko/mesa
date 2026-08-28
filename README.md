@@ -4,7 +4,8 @@ A small, calm macOS window-layout system built on [Hammerspoon](https://www.hamm
 Floating-first: it manages nothing on its own, it just snaps windows into a handful
 of deliberate arrangements when you ask, and rearranges automatically for meetings.
 
-Think **one / two / many**, plus a workstation dashboard and an automatic meeting mode.
+Think **one / two / many**, plus one three-pane working shape at two widths, and an
+automatic meeting mode.
 Everything is app-agnostic and reflows with the number of windows (Hyprland-ish),
 and it adapts to whichever screen you're on (laptop / desk / ultrawide).
 
@@ -13,8 +14,10 @@ and it adapts to whichever screen you're on (laptop / desk / ultrawide).
 | Hotkey | Layout | What it does |
 |--------|--------|--------------|
 | `⌥⌘F` | **focus** | ONE app, centered; `⌘Tab` between all windows |
+| `⌥⌘G` | **zen** | the same one-window paradigm, but a NARROW centered column (~1600px on the ultrawide vs ~2100px for focus). Most of the screen goes back to wallpaper |
 | `⌥⌘W` | **split** | the front TWO apps side by side; everything else folds behind them |
-| `⌥⌘C` | **control room** | the FOCUSED app big on the right; next two on the left (bottom taller, top smaller); others behind. Focus a window and press again to cycle it into the big slot |
+| `⌥⌘C` | **meeting shape** | three panes: the live meeting (or Zoom's calendar) top-left, Slack below it, the FOCUSED app big on the right; others fold behind. Focus a window and press again to cycle it into the big slot |
+| `⌥⌘R` | **control room** | the SAME three panes, right pane widened for reading (email, docs). Only the divider moves — no pane changes place, so it's a shift of proportions, not a new layout |
 | `⌥⌘E` | **grid** | ALL apps in a balanced grid (2 → side by side, 3 → 2+1, 4 → 2×2) |
 | `⌥⌘M` | **meeting** | auto-fires on a Zoom/Teams meeting; desk = 3-pane (meeting video top-left near the camera, chat below, browser right), laptop = single window. Reverts when the call ends |
 
@@ -51,10 +54,15 @@ Layouts adapt by display, detected from the screen name/width:
 
 Everything is named constants at the top of `init.lua`:
 
-- **Look**: `TILE_PAD`, `TILE_GAP` (split / grid / dashboard margins).
-- **Control room**: `DASH_MAIN_FRACTION` (big pane width), `DASH_BOTTOM_FRACTION` (bottom-left height).
+- **Look**: `TILE_PAD`, `TILE_GAP` (split / grid margins).
 - **Focus frame**: `NORMAL_PAD_TOP/SIDE/BOTTOM`, `LAPTOP_PAD`, `NOC_CENTER_PAD`.
-- **Meeting**: `ARC_FRACTION`, `SLACK_FRACTION`, `MEETING_MIN_H` (meeting-window min height, ~680 covers Zoom and Teams), `GAP`.
+- **Zen column**: `ZEN` — a fixed column *width* and vertical pad per display profile
+  (`laptop` / `desk` / `noc`). A width, not a margin, so it stays deliberately small as
+  the display gets wider. Capped at the focus width, so zen is never the bigger of the two.
+- **Three panes**: `MEETING_FRACTION` and `CONTROL_FRACTION` (right-pane width share for
+  `⌥⌘C` and `⌥⌘R`), `TOP_LEFT_SHARE` (what the top-left pane asks for), `GAP`.
+  There is no per-app minimum height to maintain: the top pane is placed, then measured
+  (Zoom refuses to go under ~650px), and the bottom pane takes the real remainder.
 - **Apps**: `BUNDLE = { ... }` maps roles to app bundle IDs. Change these for your own apps
   (find a bundle ID with `mdls -name kMDItemCFBundleIdentifier /Applications/Name.app`).
 

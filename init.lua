@@ -4,19 +4,32 @@
 -- layout. Master-stack and grid reflow with the number of windows (Hyprland-style),
 -- so you pick by intention, not by memorising modes.
 --
---   focus     (alt-cmd-f) : ONE app, centered; cmd-tab between all
---   split     (alt-cmd-w) : the front TWO apps side by side; everything else folds behind
---   dashboard (alt-cmd-c) : "control room" — FOCUSED app big on the right; next two on the
---                           left (bottom taller, top smaller); others behind. Cycle by focus + press.
---   grid      (alt-cmd-e) : ALL apps in a balanced grid (2 -> side by side, 4 -> 2x2, 3 -> 2+1)
---   meeting   (alt-cmd-m) : auto on a Zoom/Teams meeting; desk = 3-pane, laptop = single window
+--   focus       (alt-cmd-f) : ONE app, centered; cmd-tab between all
+--   zen         (alt-cmd-g) : the same, but a NARROW centered column — most of the
+--                             ultrawide goes to wallpaper. One thing, deliberately small.
+--   split       (alt-cmd-w) : the front TWO apps side by side; everything else folds behind
+--   meeting     (alt-cmd-c) : the meeting shape — meeting window (or Zoom's calendar when
+--                             there is no meeting) top-left, Slack below, FOCUSED app big
+--                             right. Cycle the big pane by focusing a window and pressing.
+--   control room(alt-cmd-r) : the SAME shape, right pane widened for reading (email, docs).
+--                             Only the divider moves; panes never change places. On the
+--                             ultrawide it sits in a centered column, not full bleed.
+--   grid        (alt-cmd-e) : ALL apps in a balanced grid (2 -> side by side, 4 -> 2x2, 3 -> 2+1)
+--   meeting     (alt-cmd-m) : same as alt-cmd-c; also auto on a Zoom/Teams meeting
+--                             (laptop = single window, no room for three panes)
 --
---   +--------+--------+     +--------+--------+     +-----+------------+     +----+----+
---   |        |        |     |        |        |     | TL  |            |     | A  | B  |
---   |   A    |   B    |     |   one window    |     +-----+   focused  |     +----+----+
---   |        |        |     |   (cmd-tab)     |     | BL  |   (big)    |     | C  | D  |
---   +--------+--------+     +--------+--------+     +-----+------------+     +----+----+
---          split                  focus                 dashboard               grid
+--   +--------+--------+     +--------+--------+     +-----+-----------+   +---+-------------+
+--   |        |        |     |        |        |     | mtg |           |   |mtg|             |
+--   |   A    |   B    |     |   one window    |     +-----+  focused  |   +---+   focused   |
+--   |        |        |     |   (cmd-tab)     |     |slack|   (big)   |   |slk|    (big)    |
+--   +--------+--------+     +--------+--------+     +-----+-----------+   +---+-------------+
+--          split                  focus                meeting               control room
+--
+--   +------+--------+------+
+--   |      |  one   |      |     zen: same single-window paradigm as focus, just a
+--   |      | window |      |          narrower column. On the ultrawide that is
+--   +------+--------+------+          ~1600px instead of ~2100px.
+--             zen
 --
 -- Jumps: alt-cmd s/a/v/z -> Slack / Arc / VS Code / Zoom.
 -- Diagnostics: alt-cmd-9 screen info, alt-cmd-0 Zoom/Teams window titles.
@@ -39,11 +52,26 @@ local LAPTOP_PAD      = 16       -- built-in screen: near-maximise
 local ULTRAWIDE_MIN_W = 3200     -- >= this wide => curved ultrawide ("noc")
 local NOC_CENTER_PAD  = 640      -- side margin for a single app on the ultrawide (~2100px)
 
--- Meeting 3-pane (desk/noc)
-local GAP            = 12
-local ARC_FRACTION   = 0.60      -- Arc's width share (right pane)
-local SLACK_FRACTION = 0.60      -- Slack's share of the left column
-local MEETING_MIN_H  = 680       -- meeting-window min-height floor (Zoom ~650, Teams ~669)
+-- Zen: focus, dialled down. Fixed column WIDTH per profile (not a margin), so the
+-- wider the display the more it disappears — the point is that it reads as small on
+-- the curved ultrawide, where plain focus is still 2100px of window.
+local ZEN = {
+  laptop = { w = 1100, pad = 40  },
+  desk   = { w = 1250, pad = 120 },
+  noc    = { w = 1600, pad = 140 },   -- measured: Gmail in Arc chops below ~1550
+}
+
+-- Three-pane shape (desk/noc)
+local GAP = 12
+
+-- Control room is the READING shape, so on a big display it doesn't have to fill
+-- it. Fixed content WIDTH per profile (the ZEN idea again): the wider the display,
+-- the more of it stays empty. nil = full bleed, as the meeting shape always is.
+local CONTROL_BOX = {
+  laptop = nil,
+  desk   = nil,
+  noc    = { w = 2520, padY = 110, gap = 20 },  -- right pane lands at 1700
+}
 
 local BUNDLE = {
   slack  = "com.tinyspeck.slackmacgap",
@@ -186,18 +214,32 @@ local function focalFrame(screen)
                           sf.w - 2 * NORMAL_PAD_SIDE, sf.h - NORMAL_PAD_TOP - NORMAL_BOTTOM)
 end
 
+-- The zen frame: a centered column of fixed width, never wider than the focal frame
+-- (so zen is always the calmer of the two, whatever the display).
+local function zenFrame(screen)
+  local sf = screen:frame()
+  local z  = ZEN[screenProfile(screen)]
+  local w  = math.min(z.w, focalFrame(screen).w)
+  local h  = sf.h - 2 * z.pad
+  return hs.geometry.rect(sf.x + (sf.w - w) / 2, sf.y + z.pad, w, h)
+end
+
 -- ---------------------------------------------------------------------------
 -- The three layouts
 -- ---------------------------------------------------------------------------
 
--- Focus: all windows share one centered focal frame; cmd-tab cycles them.
-local function layoutFocus()
+-- One-window paradigm: every window shares a single centered frame; cmd-tab cycles
+-- them. focus uses the focal frame, zen the narrower column.
+local function layoutSingle(frameFn)
   local scr = hs.screen.mainScreen()
-  local f = focalFrame(scr)
+  local f = frameFn(scr)
   for _, w in ipairs(realWindowsOn(scr)) do w:setFrame(f) end
   local focused = hs.window.focusedWindow()
   if focused then focused:focus() end
 end
+
+local function layoutFocus() layoutSingle(focalFrame) end
+local function layoutZen()   layoutSingle(zenFrame) end
 
 -- Split: the two front-most windows (the top of your cmd-tab queue) go side by
 -- side; every other window folds behind them, so it feels like only two are open.
@@ -260,122 +302,118 @@ local function layoutGrid()
   end
 end
 
--- Workstation dashboard: the FOCUSED window is the big main pane on the right; the
--- next two windows sit on the left (bottom slightly taller, top smaller); any others
--- fold behind the main. Cycle by focusing a window and pressing again -> it goes big.
--- (The meeting shape, minus the meeting; app-agnostic.)
-local DASH_MAIN_FRACTION   = 0.68   -- big-right pane width share (wider)
-local DASH_BOTTOM_FRACTION = 0.55   -- bottom-left height share (a touch taller than top-left)
-local DASH_PAD             = GAP    -- tight outer margin, like the meeting layout (bigger panes)
-local DASH_GAP             = GAP    -- gap between panes
-local function layoutDashboard()
-  local scr = focusedScreen()
-  local wins = realWindowsOn(scr)
-  if #wins == 0 then return end
-  local sf = scr:frame()
-  local h  = sf.h - 2 * DASH_PAD
+-- ---------------------------------------------------------------------------
+-- The three-pane shape: meeting proportions and control-room proportions
+-- ---------------------------------------------------------------------------
+-- One shape, two widths. Left column: the live meeting window (or Zoom's calendar
+-- when there is no meeting) on top, Slack below. Right: whatever you are focused
+-- on, big. alt-cmd-c gives meeting proportions, alt-cmd-r widens the right pane
+-- for reading. Nothing changes places between the two — only the divider moves,
+-- and on the ultrawide the whole control-room shape pulls into a centered box.
 
-  if #wins == 1 then
-    wins[1]:setFrame(hs.geometry.rect(sf.x + DASH_PAD, sf.y + DASH_PAD, sf.w - 2 * DASH_PAD, h))
-    wins[1]:focus()
-    return
-  end
+local MEETING_FRACTION = 0.60   -- right-pane width share: meeting proportions
+local CONTROL_FRACTION = 0.68   -- right-pane width share: control room (wider)
+local TOP_LEFT_SHARE   = 0.40   -- what the top-left pane ASKS for; apps with a
+                                -- taller minimum get measured (see threePane)
 
-  local focused = hs.window.focusedWindow()
-  local big = wins[1]
-  if focused then for _, w in ipairs(wins) do if w:id() == focused:id() then big = w; break end end end
-  local rest = {}
-  for _, w in ipairs(wins) do if w:id() ~= big:id() then rest[#rest + 1] = w end end
+-- box (optional) centers a content box of fixed width instead of filling the
+-- screen. Without one this is the original full-bleed geometry, to the pixel.
+local function columns(mainFraction, box)
+  local sf   = hs.screen.mainScreen():frame()
+  local gap  = box and box.gap  or GAP
+  local padY = box and box.padY or GAP
+  local boxW = math.min(box and box.w or math.huge, sf.w - 2 * gap)
+  local boxX = sf.x + (sf.w - boxW) / 2
 
-  local usableW = sf.w - 2 * DASH_PAD - DASH_GAP
-  local rightW  = usableW * DASH_MAIN_FRACTION
+  local usableW = boxW - gap
+  local rightW  = usableW * mainFraction
   local leftW   = usableW - rightW
-  local leftX   = sf.x + DASH_PAD
-  local rightX  = leftX + leftW + DASH_GAP
-  local topY    = sf.y + DASH_PAD
-  local botH    = (h - DASH_GAP) * DASH_BOTTOM_FRACTION
-  local topH    = (h - DASH_GAP) - botH
-
-  local bigRect = hs.geometry.rect(rightX, topY, rightW, h)
-  local blRect  = hs.geometry.rect(leftX, topY + topH + DASH_GAP, leftW, botH)  -- bottom-left, taller
-  local tlRect  = hs.geometry.rect(leftX, topY, leftW, topH)                    -- top-left, smaller
-
-  big:setFrame(bigRect)
-  if rest[1] then rest[1]:setFrame(blRect) end
-  if rest[2] then rest[2]:setFrame(tlRect) end
-  for i = 3, #rest do rest[i]:setFrame(bigRect) end   -- fold extras behind the main
-  if rest[2] then rest[2]:raise() end
-  if rest[1] then rest[1]:raise() end
-  big:raise(); big:focus()
-end
-
--- ---------------------------------------------------------------------------
--- Meeting layout (Zoom / Teams) — kept as-is; auto-triggered by the watcher below
--- ---------------------------------------------------------------------------
-
-local function columns()
-  local sf = hs.screen.mainScreen():frame()
-  local usableW = sf.w - 3 * GAP
-  local arcW  = usableW * ARC_FRACTION
-  local leftW = usableW - arcW
   return {
-    sf = sf, leftW = leftW, arcW = arcW, fullH = sf.h - 2 * GAP,
-    leftX = sf.x + GAP, rightX = sf.x + GAP + leftW + GAP, topY = sf.y + GAP,
+    sf = sf, gap = gap, leftW = leftW, rightW = rightW, fullH = sf.h - 2 * padY,
+    leftX = boxX, rightX = boxX + leftW + gap, topY = sf.y + padY,
   }
 end
 
-local function layoutMeeting()
-  local scr   = hs.screen.mainScreen()
-  local slack = mainWindowOf(BUNDLE.slack)
-  local arc   = mainWindowOf(BUNDLE.arc)
-  -- The live meeting window (Teams subject window / Zoom meeting window). If what
-  -- matched isn't sizeable (e.g. a Zoom share toolbar), fall back to a real window.
+-- Two stacked windows in the left column, one full-height window beside them, and
+-- every other window folded behind that right pane.
+--
+-- The top pane is placed FIRST and then measured. Zoom's calendar refuses to go
+-- below ~650px (Teams has its own floor), so asking for less silently leaves the
+-- window taller than its slot and it swallows whatever sits below. Reading the
+-- frame back after setFrame gives the height the app actually accepted, and the
+-- bottom pane takes the true remainder — nothing per-app to hard-code.
+local function threePane(scr, topWin, botWin, rightWin, mainFraction, box)
+  local c = columns(mainFraction, box)
+  local avail = c.fullH - c.gap
+
+  local topH = avail * TOP_LEFT_SHARE
+  place(topWin, c.leftX, c.topY, c.leftW, topH)
+  if topWin then topH = topWin:frame().h end          -- what the app actually took
+  local botH = avail - topH
+  if botH > 0 then place(botWin, c.leftX, c.topY + topH + c.gap, c.leftW, botH) end
+
+  local rightRect = hs.geometry.rect(c.rightX, c.topY, c.rightW, c.fullH)
+  if rightWin then rightWin:setFrame(rightRect) end
+
+  local keep = {}
+  for _, w in ipairs({ topWin, botWin, rightWin }) do if w then keep[w:id()] = true end end
+  for _, w in ipairs(realWindowsOn(scr)) do
+    if not keep[w:id()] then w:setFrame(rightRect) end
+  end
+  for _, w in ipairs({ topWin, botWin, rightWin }) do if w then w:raise() end end
+end
+
+-- The top-left window: the live meeting if there is one, else Zoom's calendar — so
+-- the same keys give the same shape in a meeting and out of one.
+local function topLeftWindow()
   local meet, mtgBundle = activeMeeting()
   if meet and mtgBundle then
+    -- If what matched isn't sizeable (e.g. a Zoom share toolbar), use a real window.
     local f = meet:frame()
     if not (meet:isStandard() and f.w >= 400 and f.h >= 300) then
       meet = placementWindow(mtgBundle) or meet
     end
+    return meet
   end
+  return mainWindowOf(BUNDLE.zoom)
+end
 
-  -- Laptop: single-window paradigm, meeting app maximised in front.
+local function layoutThreePane(mainFraction, box)
+  local scr = hs.screen.mainScreen()
+
+  -- Laptop: no room for three panes. Single-window paradigm, meeting app in front.
   if screenProfile(scr) == "laptop" then
-    local f = focalFrame(scr)
-    for _, w in ipairs(realWindowsOn(scr)) do w:setFrame(f) end
-    local front = meet or placementWindow(BUNDLE.zoom)
+    layoutFocus()
+    local front = topLeftWindow()
     if front then front:focus() end
     return
   end
 
-  -- Desk / NOC: 3-pane. Meeting video top-left (near camera), Slack below, Arc right.
-  local c = columns()
-  local avail  = c.sf.h - 3 * GAP
-  local slackH = avail * SLACK_FRACTION
-  local zoomH  = avail - slackH
-  if zoomH < MEETING_MIN_H then
-    zoomH  = math.min(MEETING_MIN_H, avail)
-    slackH = avail - zoomH
+  -- Zoom often sits windowless in the menu bar. Summon it, then lay out once.
+  local top = topLeftWindow()
+  if not top then
+    hs.application.launchOrFocusByBundleID(BUNDLE.zoom)
+    hs.timer.doAfter(0.8, function()
+      if topLeftWindow() then layoutThreePane(mainFraction, box) end
+    end)
+    return
   end
-  local topWin
-  if meet then
-    topWin = meet
-    place(meet,  c.leftX, c.topY,               c.leftW, zoomH)
-    place(slack, c.leftX, c.topY + zoomH + GAP, c.leftW, slackH)
-  else
-    topWin = mainWindowOf(BUNDLE.zoom)
-    place(slack,  c.leftX, c.topY,                c.leftW, slackH)
-    place(topWin, c.leftX, c.topY + slackH + GAP, c.leftW, zoomH)
-  end
-  place(arc, c.rightX, c.topY, c.arcW, c.fullH)
 
-  -- Fold every other window behind Arc.
-  local arcRect = hs.geometry.rect(c.rightX, c.topY, c.arcW, c.fullH)
-  local keep = {}
-  for _, w in ipairs({ topWin, slack, arc }) do if w then keep[w:id()] = true end end
-  for _, w in ipairs(realWindowsOn(scr)) do
-    if not keep[w:id()] then w:setFrame(arcRect) end
+  local slack = mainWindowOf(BUNDLE.slack)
+  -- The left column already owns the meeting window and Slack, so if one of those
+  -- is focused the big pane falls back to Arc rather than duplicating a window.
+  local main = hs.window.focusedWindow()
+  if not main or main:id() == top:id() or (slack and main:id() == slack:id()) then
+    main = mainWindowOf(BUNDLE.arc)
   end
-  for _, w in ipairs({ topWin, slack, arc }) do if w then w:raise() end end
+
+  threePane(scr, top, slack, main, mainFraction, box)
+  if main then main:focus() end
+end
+
+local function layoutMeeting()     layoutThreePane(MEETING_FRACTION) end
+local function layoutControlRoom()
+  layoutThreePane(CONTROL_FRACTION, CONTROL_BOX[screenProfile(hs.screen.mainScreen())])
 end
 
 -- ---------------------------------------------------------------------------
@@ -424,10 +462,12 @@ end
 -- ---------------------------------------------------------------------------
 
 hs.hotkey.bind({ "alt", "cmd" }, "f", layoutFocus)     -- one focal window (cmd-tab between all)
+hs.hotkey.bind({ "alt", "cmd" }, "g", layoutZen)       -- same, narrower: a zen column
 hs.hotkey.bind({ "alt", "cmd" }, "w", layoutSplit)     -- front two apps side by side, rest folded behind
-hs.hotkey.bind({ "alt", "cmd" }, "c", layoutDashboard) -- control room / dashboard: focused = big right; cycle by focusing + pressing
-hs.hotkey.bind({ "alt", "cmd" }, "e", layoutGrid)      -- balanced grid of all windows
-hs.hotkey.bind({ "alt", "cmd" }, "m", layoutMeeting)   -- meeting layout (also auto)
+hs.hotkey.bind({ "alt", "cmd" }, "c", layoutMeeting)     -- meeting proportions on demand
+hs.hotkey.bind({ "alt", "cmd" }, "r", layoutControlRoom) -- same shape, right pane widened for reading
+hs.hotkey.bind({ "alt", "cmd" }, "e", layoutGrid)        -- balanced grid of all windows
+hs.hotkey.bind({ "alt", "cmd" }, "m", layoutMeeting)     -- meeting layout (also auto)
 
 local function focusApp(bundleID)
   return function() hs.application.launchOrFocusByBundleID(bundleID) end
