@@ -31,8 +31,17 @@
 --   +------+--------+------+          ~1600px instead of ~2100px.
 --             zen
 --
+-- Split carries a stack: everything that isn't in the two panes folds behind the
+-- left one, and can be rotated into a pane rather than hunted for with cmd-tab.
+--
+--   alt-cmd-] / [ : rotate the FOCUSED pane forward / back through the stack
+--   alt-cmd-x     : swap the two panes (nothing resizes)
+--   alt-cmd-h / l : put the keyboard in the left / right pane
+--   alt-cmd-= / - : grow / shrink the FOCUSED pane by one detent
+--
 -- Jumps: alt-cmd s/a/v/z -> Slack / Arc / VS Code / Zoom.
 -- Diagnostics: alt-cmd-9 screen info, alt-cmd-0 Zoom/Teams window titles.
+-- Cheatsheet: alt-cmd-/ lists every binding on screen (escape or click to close).
 --
 -- Requires Accessibility permission. Reload after edits: quit + `open -a Hammerspoon`.
 
@@ -72,6 +81,23 @@ local CONTROL_BOX = {
   desk   = nil,
   noc    = { w = 2520, padY = 110, gap = 20 },  -- right pane lands at 1700
 }
+
+-- Split on a big display, same "a width, not a margin" idea as zen and control
+-- room: two panes of a fixed WIDTH in a centered box, so the wider the display the
+-- more of it stays wallpaper. paneW here is ZEN.noc.w, i.e. a split on the
+-- ultrawide is literally two zen columns side by side. nil = full bleed.
+local SPLIT_BOX = {
+  laptop = nil,
+  desk   = nil,
+  noc    = { paneW = 1600, padY = 100 },
+}
+
+-- Divider positions for split. Detents rather than a free drag, so moving the
+-- divider stays a shift of PROPORTIONS (as control room is to meeting) instead of
+-- a resize you have to aim. Each value is the left pane's share of the usable
+-- width; golden-ish either side of an even split.
+local SPLIT_RATIOS = { 0.38, 0.5, 0.62 }
+local MIN_PANE_W   = 560     -- a detent that would go under this is not offered
 
 local BUNDLE = {
   slack  = "com.tinyspeck.slackmacgap",
@@ -241,34 +267,293 @@ end
 local function layoutFocus() layoutSingle(focalFrame) end
 local function layoutZen()   layoutSingle(zenFrame) end
 
--- Split: the two front-most windows (the top of your cmd-tab queue) go side by
--- side; every other window folds behind them, so it feels like only two are open.
-local function layoutSplit()
-  local scr = focusedScreen()
-  local wins = realWindowsOn(scr)
-  if #wins == 0 then return end
-  local sf = scr:frame()
-  local h  = sf.h - 2 * TILE_PAD
-  local usableW = sf.w - 2 * TILE_PAD - TILE_GAP
-  local halfW = usableW / 2
-  local leftRect  = hs.geometry.rect(sf.x + TILE_PAD, sf.y + TILE_PAD, halfW, h)
-  local rightRect = hs.geometry.rect(sf.x + TILE_PAD + halfW + TILE_GAP, sf.y + TILE_PAD, halfW, h)
+-- Split: two panes and a stack.
+--
+-- This is the only layout that remembers anything between presses, because
+-- cycling needs something to cycle. The memory is a HINT, never the truth: every
+-- operation re-resolves it against the live windows, and anything that has closed,
+-- moved screen or stopped being tileable simply drops out and is topped up from
+-- the front of the window order. So a stale session decays back into the plain
+-- "front two, everything else behind" split instead of getting stuck.
 
-  if #wins == 1 then
-    wins[1]:setFrame(hs.geometry.rect(sf.x + TILE_PAD, sf.y + TILE_PAD, usableW + TILE_GAP, h))
-    wins[1]:focus()
-    return
+local split = { screenId = nil, leftId = nil, rightId = nil, stack = {} }
+
+-- The content box a split lives in: the whole screen inside TILE_PAD, or the
+-- centered box SPLIT_BOX asks for. The box does not change when the divider does.
+local function splitBox(scr)
+  local sf   = scr:frame()
+  local box  = SPLIT_BOX[screenProfile(scr)]
+  local padY = box and box.padY or TILE_PAD
+  local boxW = sf.w - 2 * TILE_PAD
+  if box then boxW = math.min(2 * box.paneW + TILE_GAP, boxW) end
+  return sf.x + (sf.w - boxW) / 2, sf.y + padY, boxW, sf.h - 2 * padY
+end
+
+-- left rect, right rect, and the whole-box rect used when there is only one window.
+-- `ratio` is the left pane's share of the usable width; nil means an even split.
+local function splitRects(scr, ratio)
+  local x, y, boxW, h = splitBox(scr)
+  local usableW = boxW - TILE_GAP
+  local leftW   = usableW * (ratio or 0.5)
+  return hs.geometry.rect(x, y, leftW, h),
+         hs.geometry.rect(x + leftW + TILE_GAP, y, usableW - leftW, h),
+         hs.geometry.rect(x, y, boxW, h)
+end
+
+-- The detents that leave BOTH panes usable on this screen. On the laptop the
+-- narrow ones drop out, so nudging simply stops rather than handing you a pane
+-- too thin to work in.
+local function splitDetents(scr)
+  local _, _, boxW = splitBox(scr)
+  local usableW = boxW - TILE_GAP
+  local out = {}
+  for _, r in ipairs(SPLIT_RATIOS) do
+    if usableW * r >= MIN_PANE_W and usableW * (1 - r) >= MIN_PANE_W then
+      out[#out + 1] = r
+    end
+  end
+  return #out > 0 and out or { 0.5 }
+end
+
+-- Resolve the remembered split against what is actually on screen.
+local function splitSession(scr)
+  local wins = realWindowsOn(scr)                     -- front-to-back
+  if #wins == 0 then return nil end
+
+  local fresh, used, byId = split.screenId ~= scr:id(), {}, {}
+  for _, w in ipairs(wins) do byId[w:id()] = w end
+  if fresh then split.ratio = nil end        -- a new screen starts even again
+
+  local function claim(id)
+    if fresh or not id or used[id] then return nil end
+    local w = byId[id]
+    if w then used[id] = true end
+    return w
   end
 
-  -- front two, keeping their current left/right order so they don't jump sides
-  local left, right = wins[1], wins[2]
-  if wins[2]:frame().x < wins[1]:frame().x then left, right = wins[2], wins[1] end
+  local left, right = claim(split.leftId), claim(split.rightId)
 
-  -- fold everyone else behind the left pane (hidden), then place + raise the two
-  for i = 3, #wins do wins[i]:setFrame(leftRect) end
-  left:setFrame(leftRect)
-  right:setFrame(rightRect)
-  left:raise(); right:raise()
+  -- Whatever is unclaimed, front-to-back: fills an empty pane, then forms the stack.
+  local rest = {}
+  for _, w in ipairs(wins) do if not used[w:id()] then rest[#rest + 1] = w end end
+
+  -- A brand-new split takes the front two and keeps their current left/right
+  -- order, so neither window jumps sides the first time you press alt-cmd-w.
+  if not left and not right and #rest >= 2 then
+    left, right = rest[1], rest[2]
+    if right:frame().x < left:frame().x then left, right = right, left end
+    used[left:id()], used[right:id()] = true, true
+  else
+    for _, w in ipairs(rest) do
+      if not used[w:id()] then
+        if     not left  then left  = w; used[w:id()] = true
+        elseif not right then right = w; used[w:id()] = true end
+      end
+    end
+  end
+
+  -- The stack keeps its remembered order (that is what makes rotation stable);
+  -- dead entries drop out and windows opened since join the back.
+  local stack = {}
+  for _, id in ipairs(split.stack) do
+    local w = claim(id)
+    if w then stack[#stack + 1] = w end
+  end
+  for _, w in ipairs(wins) do
+    if not used[w:id()] then used[w:id()] = true; stack[#stack + 1] = w end
+  end
+
+  -- If the keyboard is on a stacked window (you cmd-tabbed to it, so it is sitting
+  -- on top of the left pane), then that IS the left pane now. Without this the
+  -- model and the thing you are looking at disagree, and the next rotate starts
+  -- from somewhere you can't see.
+  local f = hs.window.focusedWindow()
+  if f and left then
+    for i, w in ipairs(stack) do
+      if w:id() == f:id() then stack[i], left = left, w; break end
+    end
+  end
+
+  return { left = left, right = right, stack = stack, ratio = split.ratio }
+end
+
+local function applySplit(scr, s)
+  local leftRect, rightRect, fullRect = splitRects(scr, s.ratio)
+
+  if not s.right then
+    if s.left then s.left:setFrame(fullRect); s.left:focus() end
+  else
+    -- The stack sits exactly under the left pane, so cmd-tab still reads as
+    -- "bring the next thing into the left slot".
+    for _, w in ipairs(s.stack) do w:setFrame(leftRect) end
+    s.left:setFrame(leftRect)
+    s.right:setFrame(rightRect)
+    s.left:raise(); s.right:raise()
+  end
+
+  split.screenId = scr:id()
+  split.leftId   = s.left  and s.left:id()
+  split.rightId  = s.right and s.right:id()
+  split.ratio    = s.ratio
+  split.stack    = {}
+  for _, w in ipairs(s.stack) do split.stack[#split.stack + 1] = w:id() end
+end
+
+-- A brief read-out of the split whenever it changes. The stack is invisible by
+-- design (it lives behind the left pane), so without this you cannot tell what
+-- rotating just did, or where you are in the ring.
+local HUD = {
+  w = 960, h = 94, top = 56, secs = 1.6,
+  face  = "Helvetica Neue", size = 21, sub = 18,
+  ink   = { white = 1, alpha = 1 },
+  live  = { red = 1.00, green = 0.82, blue = 0.42, alpha = 1 },
+  panel = { red = 0.04, green = 0.05, blue = 0.07, alpha = 0.94 },
+}
+local hudCanvas, hudTimer = nil, nil
+
+local function winLabel(w, withTitle)
+  if not w then return "(empty)" end
+  local app  = w:application()
+  local name = (app and app:name()) or "?"
+  if not withTitle then return name end
+  local t = w:title() or ""
+  if #t > 0 and t ~= name then
+    if #t > 26 then t = t:sub(1, 25) .. "…" end
+    return name .. "  " .. t
+  end
+  return name
+end
+
+local function showSplitHud(scr, s, side)
+  if hudTimer  then hudTimer:stop();     hudTimer  = nil end
+  if hudCanvas then hudCanvas:delete();  hudCanvas = nil end
+
+  local sf = scr:frame()
+  local c = hs.canvas.new({ x = sf.x + (sf.w - HUD.w) / 2, y = sf.y + HUD.top,
+                            w = HUD.w, h = HUD.h })
+  c[#c + 1] = { type = "rectangle", action = "fill", fillColor = HUD.panel,
+                roundedRectRadii = { xRadius = 14, yRadius = 14 } }
+
+  local function seg(str, color, size, x, w, y)
+    c[#c + 1] = { type = "text", text = str, textFont = HUD.face, textSize = size,
+                  textColor = color, textAlignment = "center",
+                  frame = { x = x, y = y, w = w, h = size + 12 } }
+  end
+
+  local half = HUD.w / 2 - 24
+  seg(winLabel(s.left, true),  side == "left"  and HUD.live or HUD.ink, HUD.size, 12, half, 15)
+  seg("│", HUD.ink, HUD.size, HUD.w / 2 - 12, 24, 15)
+  seg(winLabel(s.right, true), side == "right" and HUD.live or HUD.ink, HUD.size,
+      HUD.w / 2 + 12, half, 15)
+
+  local names = {}
+  for _, w in ipairs(s.stack) do names[#names + 1] = winLabel(w) end
+  seg(#names > 0 and ("behind:   " .. table.concat(names, "   ·   ")) or "nothing behind",
+      HUD.ink, HUD.sub, 12, HUD.w - 24, 52)
+
+  c:level(hs.canvas.windowLevels.overlay)
+  c:behavior(hs.canvas.windowBehaviors.canJoinAllSpaces)
+  c:show(0.08)
+  hudCanvas = c
+  hudTimer = hs.timer.doAfter(HUD.secs, function()
+    if hudCanvas then hudCanvas:delete(); hudCanvas = nil end
+    hudTimer = nil
+  end)
+end
+
+local function layoutSplit()
+  local scr = focusedScreen()
+  local s = splitSession(scr)
+  if not s then return end
+  applySplit(scr, s)
+  -- Leave the keyboard somewhere predictable, but don't yank it out of a pane
+  -- you are already working in.
+  local f = hs.window.focusedWindow()
+  local inPane = f and ((s.left and f:id() == s.left:id())
+                     or (s.right and f:id() == s.right:id()))
+  if not inPane and s.left then s.left:focus() end
+  showSplitHud(scr, s, focusedSide(s))
+end
+
+-- Which pane the keyboard is in. Defaults to left, so the split keys are never dead.
+local function focusedSide(s)
+  local f = hs.window.focusedWindow()
+  if f and s.right and f:id() == s.right:id() then return "right" end
+  return "left"
+end
+
+-- Rotate the focused pane through the stack. The outgoing window takes the
+-- incoming one's place in the ring, so with N windows stacked, N+1 presses of
+-- alt-cmd-] land you exactly where you started and alt-cmd-[ is its inverse.
+local function cycleSplit(dir)
+  return function()
+    local scr = focusedScreen()
+    local s = splitSession(scr)
+    if not s or #s.stack == 0 then return end
+    local side = focusedSide(s)
+    local cur  = s[side]
+    if not cur then return end
+
+    local incoming
+    if dir > 0 then
+      incoming = table.remove(s.stack, 1)
+      table.insert(s.stack, cur)
+    else
+      incoming = table.remove(s.stack)
+      table.insert(s.stack, 1, cur)
+    end
+
+    s[side] = incoming
+    applySplit(scr, s)
+    incoming:focus()
+    showSplitHud(scr, s, side)
+  end
+end
+
+-- Trade places. Only the two panes move; the stack stays where it is.
+local function swapSplit()
+  local scr = focusedScreen()
+  local s = splitSession(scr)
+  if not s or not (s.left and s.right) then return end
+  s.left, s.right = s.right, s.left
+  applySplit(scr, s)
+  showSplitHud(scr, s, focusedSide(s))
+end
+
+-- Move the divider one detent, in whichever direction makes the FOCUSED pane
+-- bigger (grow) or smaller. Relative to where the keyboard is, like the cycle
+-- keys, so there is one rule rather than a left key and a right key.
+local function nudgeSplit(grow)
+  return function()
+    local scr = focusedScreen()
+    local s = splitSession(scr)
+    if not s or not (s.left and s.right) then return end
+
+    local detents = splitDetents(scr)
+    local cur, at = s.ratio or 0.5, 1
+    for i, r in ipairs(detents) do
+      if math.abs(r - cur) < math.abs(detents[at] - cur) then at = i end
+    end
+
+    -- growing the right pane means shrinking the left share, and the reverse
+    local step = ((focusedSide(s) == "left") == grow) and 1 or -1
+    s.ratio = detents[math.max(1, math.min(#detents, at + step))]
+    applySplit(scr, s)
+    showSplitHud(scr, s, focusedSide(s))
+  end
+end
+
+-- Spatial focus, which cmd-tab cannot do: cmd-tab is app-ordered, this is
+-- left/right. Establishes the split if there isn't one, so it is never a dead key.
+local function focusSplitSide(side)
+  return function()
+    local scr = focusedScreen()
+    local s = splitSession(scr)
+    if not s then return end
+    applySplit(scr, s)
+    if s[side] then s[side]:focus() end
+    showSplitHud(scr, s, side)
+  end
 end
 
 -- Grid: all windows in a balanced grid. cols = ceil(sqrt(n)); each row stretches
@@ -460,26 +745,16 @@ end
 -- ---------------------------------------------------------------------------
 -- Hotkeys
 -- ---------------------------------------------------------------------------
-
-hs.hotkey.bind({ "alt", "cmd" }, "f", layoutFocus)     -- one focal window (cmd-tab between all)
-hs.hotkey.bind({ "alt", "cmd" }, "g", layoutZen)       -- same, narrower: a zen column
-hs.hotkey.bind({ "alt", "cmd" }, "w", layoutSplit)     -- front two apps side by side, rest folded behind
-hs.hotkey.bind({ "alt", "cmd" }, "c", layoutMeeting)     -- meeting proportions on demand
-hs.hotkey.bind({ "alt", "cmd" }, "r", layoutControlRoom) -- same shape, right pane widened for reading
-hs.hotkey.bind({ "alt", "cmd" }, "e", layoutGrid)        -- balanced grid of all windows
-hs.hotkey.bind({ "alt", "cmd" }, "m", layoutMeeting)     -- meeting layout (also auto)
+-- One table drives both the bindings and the on-screen cheatsheet (alt-cmd-/),
+-- so the two can never drift apart.
 
 local function focusApp(bundleID)
   return function() hs.application.launchOrFocusByBundleID(bundleID) end
 end
-hs.hotkey.bind({ "alt", "cmd" }, "s", focusApp(BUNDLE.slack))
-hs.hotkey.bind({ "alt", "cmd" }, "a", focusApp(BUNDLE.arc))
-hs.hotkey.bind({ "alt", "cmd" }, "v", focusApp(BUNDLE.vscode))
-hs.hotkey.bind({ "alt", "cmd" }, "z", focusApp(BUNDLE.zoom))
 
 -- Diagnostic: dump Zoom + Teams window titles (use mid meeting/share to tune matchers).
 local ZOOM_LOG = os.getenv("HOME") .. "/.hammerspoon/zoom-titles.log"
-hs.hotkey.bind({ "alt", "cmd" }, "0", function()
+local function dumpMeetingTitles()
   local parts = {}
   for _, b in ipairs({ { "Zoom", BUNDLE.zoom }, { "Teams", BUNDLE.teams } }) do
     local titles = {}
@@ -493,15 +768,147 @@ hs.hotkey.bind({ "alt", "cmd" }, "0", function()
   hs.alert.show(body, 6)
   local f = io.open(ZOOM_LOG, "a")
   if f then f:write("=== " .. os.date("%Y-%m-%d %H:%M:%S") .. " ===\n" .. body .. "\n"); f:close() end
-end)
+end
 
 -- Diagnostic: focused screen name, resolution, detected profile.
-hs.hotkey.bind({ "alt", "cmd" }, "9", function()
+local function showScreenInfo()
   local s = focusedScreen()
   local f = s:frame()
-  local msg = string.format("Screen: %s\n%dx%d  (profile: %s)",
-    s:name() or "?", math.floor(f.w), math.floor(f.h), screenProfile(s))
-  hs.alert.show(msg, 6)
-end)
+  hs.alert.show(string.format("Screen: %s\n%dx%d  (profile: %s)",
+    s:name() or "?", math.floor(f.w), math.floor(f.h), screenProfile(s)), 6)
+end
+
+local toggleCheatsheet   -- defined below; it renders from BINDINGS
+
+local BINDINGS = {
+  { "Layouts", {
+    { "f", "focus: one app centered, cmd-tab between all", layoutFocus },
+    { "g", "zen: the same, in a narrow column",            layoutZen },
+    { "w", "split: two panes, everything else stacked",    layoutSplit },
+    { "e", "grid: every window, balanced",                 layoutGrid },
+    { "c", "meeting shape: meeting + Slack left, you right", layoutMeeting },
+    { "r", "control room: same shape, wider right pane",   layoutControlRoom },
+    { "m", "meeting (also fires automatically on a call)", layoutMeeting },
+  }},
+  { "Split", {
+    { "]", "rotate the focused pane forward through the stack", cycleSplit(1) },
+    { "[", "rotate it back",                                    cycleSplit(-1) },
+    { "x", "swap the two panes",                                swapSplit },
+    { "=", "grow the focused pane one detent",                  nudgeSplit(true) },
+    { "-", "shrink it one detent",                              nudgeSplit(false) },
+    { "h", "focus the left pane",                               focusSplitSide("left") },
+    { "l", "focus the right pane",                              focusSplitSide("right") },
+  }},
+  { "Jump to app", {
+    { "s", "Slack",   focusApp(BUNDLE.slack) },
+    { "a", "Arc",     focusApp(BUNDLE.arc) },
+    { "v", "VS Code", focusApp(BUNDLE.vscode) },
+    { "z", "Zoom",    focusApp(BUNDLE.zoom) },
+  }},
+  { "Diagnostics", {
+    { "9", "screen name, size, detected profile", showScreenInfo },
+    { "0", "dump Zoom / Teams window titles",     dumpMeetingTitles },
+    { "/", "this cheatsheet",                     function() toggleCheatsheet() end },
+  }},
+}
+
+for _, group in ipairs(BINDINGS) do
+  for _, b in ipairs(group[2]) do
+    hs.hotkey.bind({ "alt", "cmd" }, b[1], b[3])
+  end
+end
+
+-- ---------------------------------------------------------------------------
+-- Cheatsheet (alt-cmd-/)
+-- ---------------------------------------------------------------------------
+-- A canvas overlay rather than an hs.alert, so the type can be big and the two
+-- columns line up. Escape or a click dismisses it, as does pressing alt-cmd-/ again.
+
+local SHEET = {
+  w        = 780,
+  pad      = 40,
+  rowH     = 34,   -- one binding
+  headH    = 46,   -- a section header, spacing included
+  titleH   = 60,
+  keyColW  = 130,
+  titleSize = 27,
+  headSize  = 15,
+  rowSize   = 19,
+  face      = "Helvetica Neue",
+  mono      = "Menlo",
+  ink       = { white = 1, alpha = 1 },
+  key       = { red = 1.00, green = 0.82, blue = 0.42, alpha = 1 },
+  head      = { red = 0.52, green = 0.78, blue = 1.00, alpha = 1 },
+  panel     = { red = 0.04, green = 0.05, blue = 0.07, alpha = 0.95 },
+  edge      = { white = 1, alpha = 0.20 },
+}
+
+local cheatsheet = nil
+local sheetModal = hs.hotkey.modal.new()
+sheetModal:bind({}, "escape", function() toggleCheatsheet() end)
+
+local function sheetRows()
+  local rows = {}
+  for _, group in ipairs(BINDINGS) do
+    rows[#rows + 1] = { head = group[1] }
+    for _, b in ipairs(group[2]) do
+      rows[#rows + 1] = { key = "⌥⌘" .. b[1]:upper(), desc = b[2] }
+    end
+  end
+  return rows
+end
+
+toggleCheatsheet = function()
+  if cheatsheet then
+    cheatsheet:delete(); cheatsheet = nil; sheetModal:exit()
+    return
+  end
+
+  local rows = sheetRows()
+  local h = SHEET.pad * 2 + SHEET.titleH
+  for _, r in ipairs(rows) do h = h + (r.head and SHEET.headH or SHEET.rowH) end
+
+  local sf = focusedScreen():frame()
+  local c = hs.canvas.new({ x = sf.x + (sf.w - SHEET.w) / 2, y = sf.y + (sf.h - h) / 2,
+                            w = SHEET.w, h = h })
+
+  local radii = { xRadius = 18, yRadius = 18 }
+  c[#c + 1] = { type = "rectangle", action = "fill",   roundedRectRadii = radii,
+                fillColor = SHEET.panel }
+  c[#c + 1] = { type = "rectangle", action = "stroke", roundedRectRadii = radii,
+                strokeColor = SHEET.edge, strokeWidth = 1 }
+
+  local function text(str, x, y, w, size, color, font)
+    c[#c + 1] = { type = "text", text = str, textFont = font or SHEET.face,
+                  textSize = size, textColor = color,
+                  frame = { x = x, y = y, w = w, h = size + 12 } }
+  end
+
+  local bodyW = SHEET.w - 2 * SHEET.pad
+  local y = SHEET.pad
+  text("mesa  ·  window layouts", SHEET.pad, y, bodyW, SHEET.titleSize, SHEET.ink)
+  y = y + SHEET.titleH
+
+  for _, r in ipairs(rows) do
+    if r.head then
+      text(r.head:upper(), SHEET.pad, y + 16, bodyW, SHEET.headSize, SHEET.head)
+      y = y + SHEET.headH
+    else
+      text(r.key,  SHEET.pad, y, SHEET.keyColW, SHEET.rowSize, SHEET.key, SHEET.mono)
+      text(r.desc, SHEET.pad + SHEET.keyColW, y, bodyW - SHEET.keyColW,
+           SHEET.rowSize, SHEET.ink)
+      y = y + SHEET.rowH
+    end
+  end
+
+  c:level(hs.canvas.windowLevels.overlay)
+  c:behavior(hs.canvas.windowBehaviors.canJoinAllSpaces)
+  c:canvasMouseEvents(true, false, false, false)
+  c:mouseCallback(function() toggleCheatsheet() end)
+  c:show(0.12)
+
+  cheatsheet = c
+  sheetModal:enter()
+end
 
 hs.alert.show("Window layouts loaded")
