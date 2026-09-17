@@ -385,7 +385,9 @@ local function splitSession(scr)
            stackSide = stackSide }
 end
 
-local function applySplit(scr, s)
+-- Move the windows. Says nothing about what is remembered — commitSplit does
+-- that — so the caller decides when a layout becomes the new session.
+local function renderSplit(scr, s)
   local leftRect, rightRect, fullRect = splitRects(scr, s.ratio)
 
   if not s.right then
@@ -401,13 +403,23 @@ local function applySplit(scr, s)
     s.left:raise(); s.right:raise()
   end
 
-  split.screenId = scr:id()
-  split.leftId   = s.left  and s.left:id()
-  split.rightId  = s.right and s.right:id()
-  split.ratio    = s.ratio
+end
+
+-- Remember this session as the hint the next press resolves against.
+local function commitSplit(scr, s)
+  split.screenId  = scr:id()
+  split.leftId    = s.left  and s.left:id()
+  split.rightId   = s.right and s.right:id()
+  split.ratio     = s.ratio
   split.stackSide = s.stackSide or "left"
-  split.stack    = {}
+  split.stack     = {}
   for _, w in ipairs(s.stack) do split.stack[#split.stack + 1] = w:id() end
+end
+
+-- The usual pairing: lay it out, then remember it.
+local function applySplit(scr, s)
+  renderSplit(scr, s)
+  commitSplit(scr, s)
 end
 
 -- A brief read-out of the split whenever it changes. The stack is invisible by
@@ -824,9 +836,22 @@ local BINDINGS = {
   }},
 }
 
+-- Every binding goes through here, so a hotkey can never fail silently again.
+-- An unguarded callback that errors just stops, which is how `focusedSide` sat
+-- broken for nine days: the split applied, the HUD died, nothing said so.
+local function safe(label, fn)
+  return function()
+    local ok, err = pcall(fn)
+    if not ok then
+      hs.alert.show("mesa: " .. label .. "\n" .. tostring(err), 4)
+      print("mesa ERROR in " .. label .. ": " .. tostring(err))
+    end
+  end
+end
+
 for _, group in ipairs(BINDINGS) do
   for _, b in ipairs(group[2]) do
-    hs.hotkey.bind({ "alt", "cmd" }, b[1], b[3])
+    hs.hotkey.bind({ "alt", "cmd" }, b[1], safe(b[2], b[3]))
   end
 end
 
