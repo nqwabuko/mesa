@@ -276,7 +276,8 @@ local function layoutZen()   layoutSingle(zenFrame) end
 -- the front of the window order. So a stale session decays back into the plain
 -- "front two, everything else behind" split instead of getting stuck.
 
-local split = { screenId = nil, leftId = nil, rightId = nil, stack = {} }
+local split = { screenId = nil, leftId = nil, rightId = nil, stack = {},
+                stackSide = "left" }
 
 -- The content box a split lives in: the whole screen inside TILE_PAD, or the
 -- centered box SPLIT_BOX asks for. The box does not change when the divider does.
@@ -322,7 +323,7 @@ local function splitSession(scr)
 
   local fresh, used, byId = split.screenId ~= scr:id(), {}, {}
   for _, w in ipairs(wins) do byId[w:id()] = w end
-  if fresh then split.ratio = nil end        -- a new screen starts even again
+  if fresh then split.ratio, split.stackSide = nil, nil end  -- a new screen starts over
 
   local function claim(id)
     if fresh or not id or used[id] then return nil end
@@ -364,17 +365,24 @@ local function splitSession(scr)
   end
 
   -- If the keyboard is on a stacked window (you cmd-tabbed to it, so it is sitting
-  -- on top of the left pane), then that IS the left pane now. Without this the
-  -- model and the thing you are looking at disagree, and the next rotate starts
-  -- from somewhere you can't see.
+  -- on top of whichever pane the stack lives under), then that IS that pane now.
+  -- Without this the model and the thing you are looking at disagree, and the next
+  -- rotate starts from somewhere you can't see.
+  local stackSide = split.stackSide or "left"
+  local host = (stackSide == "right") and right or left
   local f = hs.window.focusedWindow()
-  if f and left then
+  if f and host then
     for i, w in ipairs(stack) do
-      if w:id() == f:id() then stack[i], left = left, w; break end
+      if w:id() == f:id() then
+        stack[i] = host
+        if stackSide == "right" then right = w else left = w end
+        break
+      end
     end
   end
 
-  return { left = left, right = right, stack = stack, ratio = split.ratio }
+  return { left = left, right = right, stack = stack, ratio = split.ratio,
+           stackSide = stackSide }
 end
 
 local function applySplit(scr, s)
@@ -383,9 +391,11 @@ local function applySplit(scr, s)
   if not s.right then
     if s.left then s.left:setFrame(fullRect); s.left:focus() end
   else
-    -- The stack sits exactly under the left pane, so cmd-tab still reads as
-    -- "bring the next thing into the left slot".
-    for _, w in ipairs(s.stack) do w:setFrame(leftRect) end
+    -- The stack sits under whichever pane you last rotated, so cycling only ever
+    -- redraws that half of the screen and cmd-tab still reads as "bring the next
+    -- thing into the slot I am working in".
+    local stackRect = (s.stackSide == "right") and rightRect or leftRect
+    for _, w in ipairs(s.stack) do w:setFrame(stackRect) end
     s.left:setFrame(leftRect)
     s.right:setFrame(rightRect)
     s.left:raise(); s.right:raise()
@@ -395,6 +405,7 @@ local function applySplit(scr, s)
   split.leftId   = s.left  and s.left:id()
   split.rightId  = s.right and s.right:id()
   split.ratio    = s.ratio
+  split.stackSide = s.stackSide or "left"
   split.stack    = {}
   for _, w in ipairs(s.stack) do split.stack[#split.stack + 1] = w:id() end
 end
@@ -461,6 +472,13 @@ local function showSplitHud(scr, s, side)
   end)
 end
 
+-- Which pane the keyboard is in. Defaults to left, so the split keys are never dead.
+local function focusedSide(s)
+  local f = hs.window.focusedWindow()
+  if f and s.right and f:id() == s.right:id() then return "right" end
+  return "left"
+end
+
 local function layoutSplit()
   local scr = focusedScreen()
   local s = splitSession(scr)
@@ -473,13 +491,6 @@ local function layoutSplit()
                      or (s.right and f:id() == s.right:id()))
   if not inPane and s.left then s.left:focus() end
   showSplitHud(scr, s, focusedSide(s))
-end
-
--- Which pane the keyboard is in. Defaults to left, so the split keys are never dead.
-local function focusedSide(s)
-  local f = hs.window.focusedWindow()
-  if f and s.right and f:id() == s.right:id() then return "right" end
-  return "left"
 end
 
 -- Rotate the focused pane through the stack. The outgoing window takes the
@@ -503,7 +514,8 @@ local function cycleSplit(dir)
       table.insert(s.stack, 1, cur)
     end
 
-    s[side] = incoming
+    s[side]     = incoming
+    s.stackSide = side          -- the pile follows the pane you are cycling
     applySplit(scr, s)
     incoming:focus()
     showSplitHud(scr, s, side)
@@ -818,21 +830,71 @@ for _, group in ipairs(BINDINGS) do
   end
 end
 
+-- Which way the Rainy 75 is reaching this Mac. Wobkey ships a different USB
+-- product ID per connection mode (the reason there is a VIA JSON per mode), so
+-- the HID tree answers it outright: 0x5055 wired, 0x5088 the 2.4GHz dongle.
+-- ~0.2s, so it runs when the sheet opens rather than on a timer.
+local function rainyConnection()
+  local ok, out = pcall(hs.execute,
+    [==[/usr/sbin/ioreg -c IOHIDDevice -r -d 1 | /usr/bin/grep -E '"(VendorID|ProductID)"']==])
+  if not ok or type(out) ~= "string" then return "could not read" end
+  if out:find("20565", 1, true) then return "wired (USB-C)" end      -- 0x5055
+  if out:find("20616", 1, true) then return "2.4GHz dongle" end      -- 0x5088
+  if out:find("12815", 1, true) then return "Bluetooth" end          -- 0x320F, no USB pid
+  return "not connected"
+end
+
+-- Reference-only sections: nothing is bound, they just share the sheet.
+-- A description may be a function, evaluated each time the sheet opens, for
+-- rows that report live state rather than a fixed shortcut.
+-- Wobkey Rainy 75 Pro in macOS mode (Fn+M). The keycaps are swapped, so the cap
+-- marked Win sends Command and the cap marked Alt sends Option.
+local REFERENCE = {
+  { "Rainy 75", {
+    { "connection", rainyConnection },
+    { "Fn + M",     "hold 3s: switch macOS / Windows layout" },
+    { "Fn + Tab",   "cycle wired / BT 1-3 / 2.4GHz dongle" },
+    { "Fn + F1..3", "hold 3s: re-pair that Bluetooth slot" },
+    { "Fn + Space", "battery level, each number key is 10%" },
+    { "Fn + L",     "long battery mode, trades speed for runtime" },
+    { "Fn + H",     "ultra-low latency, for gaming, leave it off" },
+    { "Esc",        "hold 3s: factory reset, wipes the keymap" },
+  }},
+  { "Lighting", {
+    { "Fn + \\",    "cycle the 18 lighting modes" },
+    { "Fn + Bksp",  "backlight on / off" },
+    { "Fn + Enter", "switch static colour" },
+    { "Fn + up/dn", "brightness" },
+    { "Fn + lt/rt", "effect speed" },
+  }},
+  { "Worth knowing", {
+    { "power",    "switch hides under the Caps Lock keycap" },
+    { "charging", "5V 1-2A only, never a fast charger" },
+    { "sleep",    "1 min idle, any key wakes it" },
+    { "dongle",   "within 15cm, away from USB 3 ports" },
+    { "VIA",      "usevia.app, Chromium only, not Safari" },
+    { "firmware", "updater is a Windows .exe, leave it alone" },
+    { "dead keys","turn Fn + H off before anything else" },
+  }},
+}
+
 -- ---------------------------------------------------------------------------
 -- Cheatsheet (alt-cmd-/)
 -- ---------------------------------------------------------------------------
--- A canvas overlay rather than an hs.alert, so the type can be big and the two
--- columns line up. Escape or a click dismisses it, as does pressing alt-cmd-/ again.
+-- A canvas overlay rather than an hs.alert, so the type can be big. Two balanced
+-- columns: the bindings first, then the Rainy 75 reference. Escape, a click, or
+-- alt-cmd-/ again dismisses it.
 
 local SHEET = {
-  w        = 780,
   pad      = 40,
-  rowH     = 34,   -- one binding
-  headH    = 46,   -- a section header, spacing included
+  gutter   = 44,
+  colW     = 570,  -- one column: key column plus its descriptions
+  rowH     = 30,   -- one binding
+  headH    = 42,   -- a section header, spacing included
   titleH   = 60,
   keyColW  = 130,
   titleSize = 27,
-  headSize  = 15,
+  headSize  = 17,
   rowSize   = 19,
   face      = "Helvetica Neue",
   mono      = "Menlo",
@@ -842,20 +904,47 @@ local SHEET = {
   panel     = { red = 0.04, green = 0.05, blue = 0.07, alpha = 0.95 },
   edge      = { white = 1, alpha = 0.20 },
 }
+SHEET.w = SHEET.pad * 2 + SHEET.colW * 2 + SHEET.gutter
 
 local cheatsheet = nil
 local sheetModal = hs.hotkey.modal.new()
 sheetModal:bind({}, "escape", function() toggleCheatsheet() end)
 
-local function sheetRows()
-  local rows = {}
-  for _, group in ipairs(BINDINGS) do
-    rows[#rows + 1] = { head = group[1] }
-    for _, b in ipairs(group[2]) do
-      rows[#rows + 1] = { key = "⌥⌘" .. b[1]:upper(), desc = b[2] }
+-- Every section from both tables, measured so the columns can be balanced.
+local function sheetSections()
+  local out = {}
+  local function add(groups, keyFor)
+    for _, g in ipairs(groups) do
+      local rows = {}
+      for _, b in ipairs(g[2]) do
+        local desc = b[2]
+        if type(desc) == "function" then desc = desc() end
+        rows[#rows + 1] = { key = keyFor(b), desc = desc }
+      end
+      out[#out + 1] = { head = g[1], rows = rows,
+                        h = SHEET.headH + #rows * SHEET.rowH }
     end
   end
-  return rows
+  add(BINDINGS,  function(b) return "⌥⌘" .. b[1]:upper() end)
+  add(REFERENCE, function(b) return b[1] end)
+  return out
+end
+
+-- Fill the left column until it passes half the total height, the rest goes
+-- right. Sections stay whole and in order, so each column reads top to bottom.
+local function sheetColumns()
+  local secs, total = sheetSections(), 0
+  for _, s in ipairs(secs) do total = total + s.h end
+
+  local left, right, run = {}, {}, 0
+  for _, s in ipairs(secs) do
+    if run < total / 2 then
+      left[#left + 1] = s; run = run + s.h
+    else
+      right[#right + 1] = s
+    end
+  end
+  return left, right, math.max(run, total - run)
 end
 
 toggleCheatsheet = function()
@@ -864,12 +953,14 @@ toggleCheatsheet = function()
     return
   end
 
-  local rows = sheetRows()
-  local h = SHEET.pad * 2 + SHEET.titleH
-  for _, r in ipairs(rows) do h = h + (r.head and SHEET.headH or SHEET.rowH) end
+  local left, right, colH = sheetColumns()
+  local h = SHEET.pad * 2 + SHEET.titleH + colH
 
   local sf = focusedScreen():frame()
-  local c = hs.canvas.new({ x = sf.x + (sf.w - SHEET.w) / 2, y = sf.y + (sf.h - h) / 2,
+  -- Clamp to the top: on a laptop screen a tall sheet must not start above the
+  -- menu bar, where its first rows would be cut off.
+  local c = hs.canvas.new({ x = sf.x + (sf.w - SHEET.w) / 2,
+                            y = math.max(sf.y, sf.y + (sf.h - h) / 2),
                             w = SHEET.w, h = h })
 
   local radii = { xRadius = 18, yRadius = 18 }
@@ -884,22 +975,26 @@ toggleCheatsheet = function()
                   frame = { x = x, y = y, w = w, h = size + 12 } }
   end
 
-  local bodyW = SHEET.w - 2 * SHEET.pad
-  local y = SHEET.pad
-  text("mesa  ·  window layouts", SHEET.pad, y, bodyW, SHEET.titleSize, SHEET.ink)
-  y = y + SHEET.titleH
-
-  for _, r in ipairs(rows) do
-    if r.head then
-      text(r.head:upper(), SHEET.pad, y + 16, bodyW, SHEET.headSize, SHEET.head)
+  local function column(secs, x, y)
+    for _, s in ipairs(secs) do
+      text(s.head:upper(), x, y + 14, SHEET.colW, SHEET.headSize, SHEET.head)
       y = y + SHEET.headH
-    else
-      text(r.key,  SHEET.pad, y, SHEET.keyColW, SHEET.rowSize, SHEET.key, SHEET.mono)
-      text(r.desc, SHEET.pad + SHEET.keyColW, y, bodyW - SHEET.keyColW,
-           SHEET.rowSize, SHEET.ink)
-      y = y + SHEET.rowH
+      for _, r in ipairs(s.rows) do
+        text(r.key, x, y, SHEET.keyColW, SHEET.rowSize, SHEET.key, SHEET.mono)
+        text(r.desc, x + SHEET.keyColW, y, SHEET.colW - SHEET.keyColW,
+             SHEET.rowSize, SHEET.ink)
+        y = y + SHEET.rowH
+      end
     end
   end
+
+  local top = SHEET.pad
+  text("mesa  ·  layouts & keyboard", SHEET.pad, top,
+       SHEET.w - 2 * SHEET.pad, SHEET.titleSize, SHEET.ink)
+  top = top + SHEET.titleH
+
+  column(left,  SHEET.pad, top)
+  column(right, SHEET.pad + SHEET.colW + SHEET.gutter, top)
 
   c:level(hs.canvas.windowLevels.overlay)
   c:behavior(hs.canvas.windowBehaviors.canJoinAllSpaces)
