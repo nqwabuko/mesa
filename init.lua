@@ -16,6 +16,8 @@
 --                             ultrawide it sits in a centered column, not full bleed.
 --   grid        (alt-cmd-e) : ALL apps in a balanced grid (2 -> side by side, 4 -> 2x2, 3 -> 2+1)
 --   meeting     (alt-cmd-m) : same as alt-cmd-c; also auto on a Zoom/Teams meeting
+--                             or a Slack huddle (the huddle window takes the top-left
+--                             slot, Slack's main window stays below it)
 --                             (laptop = single window, no room for three panes)
 --
 --   +--------+--------+     +--------+--------+     +-----+-----------+   +---+-------------+
@@ -40,7 +42,7 @@
 --   alt-cmd-= / - : grow / shrink the FOCUSED pane by one detent
 --
 -- Jumps: alt-cmd s/a/v/z -> Slack / Arc / VS Code / Zoom.
--- Diagnostics: alt-cmd-9 screen info, alt-cmd-0 Zoom/Teams window titles.
+-- Diagnostics: alt-cmd-9 screen info, alt-cmd-0 Zoom/Teams/Slack window titles.
 -- Cheatsheet: alt-cmd-/ lists every binding on screen (escape or click to close).
 --
 -- Requires Accessibility permission. Reload after edits: quit + `open -a Hammerspoon`.
@@ -182,13 +184,57 @@ local function windowIsMeeting(title, m)
   return true
 end
 
--- Returns (window, bundle) for the live meeting, or nil.
+-- Slack huddles don't fit the pattern list above. A huddle opens a SECOND Slack
+-- window, and nothing inside it says "huddle": subrole, buttons and accessibility
+-- tree are identical to the main window's, and Electron exposes no web content to
+-- match on. What Slack does do is mark the main window "<channel> - <workspace> -
+-- Slack [Main]" once a second window exists. So the test is relational rather than
+-- per-window: a standard Slack window that ISN'T the marked one, and only while the
+-- marker is present. Requiring the marker is what stops everyday single-window
+-- Slack from ever reading as a call.
+local SLACK_MAIN_MARK = "[main]"
+
+local function isSlackMain(title)
+  return ((title or ""):lower()):find(SLACK_MAIN_MARK, 1, true) ~= nil
+end
+
+-- The Slack window for the bottom-left pane: the marked main window, else the only
+-- one there is. Never the huddle window, which owns the top-left slot instead.
+local function slackMainWindow()
+  local first
+  for _, w in ipairs(appWindows(BUNDLE.slack)) do
+    if w:isStandard() then
+      if isSlackMain(w:title()) then return w end
+      first = first or w
+    end
+  end
+  return first
+end
+
+-- The live huddle window, or nil. A popped-out thread or channel window would also
+-- read as one; if that ever bites, exclude its title here (alt-cmd-0 dumps them).
+local function slackHuddleWindow()
+  local marked, other = false, nil
+  for _, w in ipairs(appWindows(BUNDLE.slack)) do
+    if w:isStandard() and w:isVisible() then
+      if isSlackMain(w:title()) then marked = true
+      else other = other or w end
+    end
+  end
+  if marked then return other end
+  return nil
+end
+
+-- Returns (window, bundle) for the live meeting, or nil. Zoom and Teams are tried
+-- before Slack, so a huddle window left open during a Zoom call never wins the slot.
 local function activeMeeting()
   for _, m in ipairs(MEETING_APPS) do
     for _, w in ipairs(appWindows(m.bundle)) do
       if windowIsMeeting(w:title(), m) then return w, m.bundle end
     end
   end
+  local huddle = slackHuddleWindow()
+  if huddle then return huddle, BUNDLE.slack end
   return nil
 end
 
@@ -678,8 +724,10 @@ local function topLeftWindow()
   local meet, mtgBundle = activeMeeting()
   if meet and mtgBundle then
     -- If what matched isn't sizeable (e.g. a Zoom share toolbar), use a real window.
+    -- A huddle window is already vetted as standard, and the only other Slack window
+    -- is the bottom pane, so swapping it out would place one window in both slots.
     local f = meet:frame()
-    if not (meet:isStandard() and f.w >= 400 and f.h >= 300) then
+    if mtgBundle ~= BUNDLE.slack and not (meet:isStandard() and f.w >= 400 and f.h >= 300) then
       meet = placementWindow(mtgBundle) or meet
     end
     return meet
@@ -708,7 +756,7 @@ local function layoutThreePane(mainFraction, box)
     return
   end
 
-  local slack = mainWindowOf(BUNDLE.slack)
+  local slack = slackMainWindow()
   -- The left column already owns the meeting window and Slack, so if one of those
   -- is focused the big pane falls back to Arc rather than duplicating a window.
   local main = hs.window.focusedWindow()
@@ -745,7 +793,7 @@ local function exitMeeting()
   if not inMeeting then return end
   inMeeting = false
   layoutFocus()
-  local slack = mainWindowOf(BUNDLE.slack)
+  local slack = slackMainWindow()
   if slack then slack:focus() end
 end
 
@@ -759,7 +807,7 @@ hs.timer.doEvery(2, function()
   end
 end)
 
-for _, appName in ipairs({ "zoom.us", "Microsoft Teams" }) do
+for _, appName in ipairs({ "zoom.us", "Microsoft Teams", "Slack" }) do
   hs.window.filter.new(false):setAppFilter(appName, {})
     :subscribe(hs.window.filter.windowCreated, function()
       if meetingActive() then absentTicks = 0; enterMeeting() end
@@ -776,11 +824,13 @@ local function focusApp(bundleID)
   return function() hs.application.launchOrFocusByBundleID(bundleID) end
 end
 
--- Diagnostic: dump Zoom + Teams window titles (use mid meeting/share to tune matchers).
+-- Diagnostic: dump Zoom + Teams + Slack window titles (use mid meeting/share/huddle
+-- to tune matchers; for Slack, note which window carries the [Main] marker).
 local ZOOM_LOG = os.getenv("HOME") .. "/.hammerspoon/zoom-titles.log"
 local function dumpMeetingTitles()
   local parts = {}
-  for _, b in ipairs({ { "Zoom", BUNDLE.zoom }, { "Teams", BUNDLE.teams } }) do
+  for _, b in ipairs({ { "Zoom", BUNDLE.zoom }, { "Teams", BUNDLE.teams },
+                       { "Slack", BUNDLE.slack } }) do
     local titles = {}
     for _, w in ipairs(appWindows(b[2])) do
       titles[#titles + 1] = string.format('  "%s" [std=%s %dx%d]',
@@ -831,7 +881,7 @@ local BINDINGS = {
   }},
   { "Diagnostics", {
     { "9", "screen name, size, detected profile", showScreenInfo },
-    { "0", "dump Zoom / Teams window titles",     dumpMeetingTitles },
+    { "0", "dump Zoom / Teams / Slack window titles", dumpMeetingTitles },
     { "/", "this cheatsheet",                     function() toggleCheatsheet() end },
   }},
 }

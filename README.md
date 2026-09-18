@@ -19,7 +19,7 @@ and it adapts to whichever screen you're on (laptop / desk / ultrawide).
 | `⌥⌘C` | **meeting shape** | three panes: the live meeting (or Zoom's calendar) top-left, Slack below it, the FOCUSED app big on the right; others fold behind. Focus a window and press again to cycle it into the big slot |
 | `⌥⌘R` | **control room** | the SAME three panes, right pane widened for reading (email, docs). Only the divider moves — no pane changes place, so it's a shift of proportions, not a new layout |
 | `⌥⌘E` | **grid** | ALL apps in a balanced grid (2 → side by side, 3 → 2+1, 4 → 2×2) |
-| `⌥⌘M` | **meeting** | auto-fires on a Zoom/Teams meeting; desk = 3-pane (meeting video top-left near the camera, chat below, browser right), laptop = single window. Reverts when the call ends |
+| `⌥⌘M` | **meeting** | auto-fires on a Zoom/Teams meeting or a Slack huddle; desk = 3-pane (meeting video top-left near the camera, chat below, browser right), laptop = single window. Reverts when the call ends |
 
 ### Working inside a split
 
@@ -58,7 +58,7 @@ is topped up from the front of the window order. A stale session decays back int
 "front two, rest behind" split rather than getting stuck.
 
 Jump straight to an app: `⌥⌘S` Slack · `⌥⌘A` Arc · `⌥⌘V` VS Code · `⌥⌘Z` Zoom.
-Diagnostics: `⌥⌘9` screen name/size/profile · `⌥⌘0` dump live Zoom/Teams window titles.
+Diagnostics: `⌥⌘9` screen name/size/profile · `⌥⌘0` dump live Zoom/Teams/Slack window titles.
 **Cheatsheet: `⌥⌘/`** puts every binding on screen in large type; escape, a click, or `⌥⌘/`
 again closes it. It renders from the same `BINDINGS` table that does the binding, so it
 can't go stale.
@@ -119,6 +119,16 @@ Everything is named constants at the top of `init.lua`:
   share doesn't read as "meeting ended").
 - **Teams** names a meeting window `<subject> | Microsoft Teams`, with no keyword, so
   it's matched as "any Teams window except the known idle tabs (Chat, Calendar, …)".
+- **Slack huddles** can't be matched that way at all. A huddle opens a second Slack
+  window that is identical to the first in every respect an app can see — same subrole,
+  same buttons, same (empty) accessibility tree. The only difference is that Slack marks
+  the main window `… - Slack [Main]` once a second window exists, so the test is
+  relational: a standard Slack window that isn't the marked one, *and only while the
+  marker is present*. That second condition is what keeps ordinary single-window Slack
+  from reading as a call, whichever way Slack handles the marker when alone. The huddle
+  window takes the top-left slot and Slack's main window stays in the pane below it.
+  A popped-out thread or channel window would also read as a huddle; exclude it by title
+  in `slackHuddleWindow` if that ever bites.
 - If a meeting ever fails to auto-arrange, press `⌥⌘0` mid-call to dump the real
   window titles and tune the patterns in `MEETING_APPS`.
 
