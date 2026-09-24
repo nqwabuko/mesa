@@ -66,8 +66,8 @@ can't go stale.
 ## Install
 
 ```bash
-git clone <this-repo> ~/CharliesCode/mesa
-cd ~/CharliesCode/mesa
+git clone https://github.com/nqwabuko/mesa.git ~/.mesa
+cd ~/.mesa
 ./install.sh
 ```
 
